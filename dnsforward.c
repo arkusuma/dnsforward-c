@@ -11,6 +11,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 
 #define LOCK_FILE "/tmp/dnsforward.pid"
 
@@ -55,6 +56,7 @@ void daemonize() {
 	close(STDOUT_FILENO);
 	close(STDERR_FILENO);
 
+	
 	/* Ensure only one copy */
 	int fd = open(G.lock, O_RDWR | O_CREAT, 0600);
 	if (fd < 0) {
@@ -63,7 +65,8 @@ void daemonize() {
 	}
 
 	/* Try to lock file */
-	if (lockf(fd, F_TLOCK, 0) < 0) {
+	struct flock fl = { F_WRLCK, SEEK_SET, 0, 0, 0 };
+	if (fcntl(fd, F_SETLKW, &fl) < 0) {
 		syslog(LOG_INFO, "Could not lock PID lock file %s, exiting", G.lock);
 		exit(EXIT_FAILURE);
 	}
@@ -72,9 +75,6 @@ void daemonize() {
 	char str[12];
 	sprintf(str, "%d", getpid());
 	write(fd, str, strlen(str));
-}
-
-void signal_handler(int sig) {
 }
 
 #define TIMEOUT 2
@@ -97,7 +97,7 @@ void resolve(const void *buf, int len, struct sockaddr *from, int fromlen) {
 		exit_error("socket");
 
 	// Setup alarm for connect()
-	signal(SIGALRM, signal_handler);
+	signal(SIGALRM, SIG_IGN);
 	alarm(TIMEOUT);
 	if (connect(sock, res->ai_addr, res->ai_addrlen) < 0)
 		exit_error("connect");
@@ -139,8 +139,14 @@ void resolve(const void *buf, int len, struct sockaddr *from, int fromlen) {
 	exit(EXIT_SUCCESS);
 }
 
+void signal_handler(int sig) {
+	wait(NULL);
+}
+
 void start_server() {
 	struct addrinfo hints, *res;
+
+	signal(SIGCHLD, signal_handler);
 
 	// Get remote server info
 	memset(&hints, 0, sizeof(hints));
@@ -165,12 +171,6 @@ void start_server() {
 	if (bind(G.server_sock, res->ai_addr, res->ai_addrlen) < 0)
 		exit_error("bind");
 
-	struct timeval tv;
-	tv.tv_sec = 10;
-	tv.tv_usec = 0;
-	if (setsockopt(G.server_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0)
-		exit_error("setsockopt");
-
 	//daemonize();
 
 	for (;;) {
@@ -179,13 +179,10 @@ void start_server() {
 		int fromlen, len;
 		fromlen = sizeof(from);
 		if ((len = recvfrom(G.server_sock, buf, sizeof(buf), 0,
-						(struct sockaddr *) &from, &fromlen)) > 0)
-			resolve(buf, len, (struct sockaddr *) &from, fromlen);
-		else if (errno != EWOULDBLOCK)
+						(struct sockaddr *) &from, &fromlen)) < 0)
 			exit_error("recvfrom");
 
-		while (waitpid(-1, NULL, WNOHANG) > 0)
-			; // wait all finished child
+		resolve(buf, len, (struct sockaddr *) &from, fromlen);
 	}
 }
 
