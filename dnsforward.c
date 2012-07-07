@@ -55,7 +55,6 @@ void daemonize() {
 	close(STDIN_FILENO);
 	close(STDOUT_FILENO);
 	close(STDERR_FILENO);
-
 	
 	/* Ensure only one copy */
 	int fd = open(G.lock, O_RDWR | O_CREAT, 0600);
@@ -73,7 +72,7 @@ void daemonize() {
 
 	/* Get and format PID */
 	char str[12];
-	sprintf(str, "%d", getpid());
+	sprintf(str, "%d\n", getpid());
 	write(fd, str, strlen(str));
 }
 
