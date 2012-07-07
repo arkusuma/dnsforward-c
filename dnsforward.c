@@ -171,7 +171,7 @@ void start_server() {
 	if (bind(G.server_sock, res->ai_addr, res->ai_addrlen) < 0)
 		exit_error("bind");
 
-	//daemonize();
+	daemonize();
 
 	for (;;) {
 		unsigned char buf[512];
@@ -195,6 +195,7 @@ int main(int argc, char **argv) {
 				"  port:   remote DNS port\n"
 				"  type:   server type, udp or tcp\n"
 				"  lock:   lock file, will contain PID\n");
+		exit(EXIT_FAILURE);
 	}
 
 	G.server = argv[1];
