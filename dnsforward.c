@@ -13,12 +13,11 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
-#define LOCK_FILE "/tmp/dnsforward.pid"
-
 struct GLOBAL {
 	char *server;
 	char *port;
-	char *lock;
+	char *lockname;
+	int lockfd;
 	int type;
 	int server_sock;
 	struct addrinfo server_info;
@@ -32,6 +31,16 @@ struct GLOBAL {
 void _exit_error(const char *str) {
 	perror(str);
 	exit(EXIT_FAILURE);
+}
+
+void cleanup() {
+	close(G.lockfd);
+	unlink(G.lockname);
+}
+
+void cleanup_handler(int sig) {
+	// cleanup() will be called by exit()
+	exit(EXIT_SUCCESS);
 }
 
 void daemonize() {
@@ -57,28 +66,37 @@ void daemonize() {
 	close(STDERR_FILENO);
 	
 	/* Ensure only one copy */
-	int fd = open(G.lock, O_RDWR | O_CREAT, 0600);
-	if (fd < 0) {
-		syslog(LOG_INFO, "Could not open PID lock file %s, exiting", G.lock);
+  G.lockfd = open(G.lockname, O_RDWR | O_CREAT, 0644);
+	if (G.lockfd < 0) {
+		syslog(LOG_INFO, "Could not open PID lock file %s, exiting", G.lockname);
 		exit(EXIT_FAILURE);
 	}
 
 	/* Try to lock file */
 	struct flock fl = { F_WRLCK, SEEK_SET, 0, 0, 0 };
-	if (fcntl(fd, F_SETLKW, &fl) < 0) {
-		syslog(LOG_INFO, "Could not lock PID lock file %s, exiting", G.lock);
+	if (fcntl(G.lockfd, F_SETLK, &fl) < 0) {
+		syslog(LOG_INFO, "Could not lock PID lock file %s, exiting", G.lockname);
 		exit(EXIT_FAILURE);
 	}
 
-	/* Get and format PID */
+	/* Write daemon params on lock file */
 	char str[12];
 	sprintf(str, "%d\n", getpid());
-	write(fd, str, strlen(str));
+	write(G.lockfd, str, strlen(str));
+	write(G.lockfd, G.server, strlen(G.server));
+	write(G.lockfd, "\n", 1);
+	write(G.lockfd, G.port, strlen(G.port));
+	snprintf(str, sizeof(str), "\n%s\n", G.type == SOCK_DGRAM ? "udp" : "tcp");
+	write(G.lockfd, str, strlen(str));
+
+	signal(SIGINT, cleanup_handler);
+	signal(SIGTERM, cleanup_handler);
+	atexit(cleanup);
 }
 
 #define TIMEOUT 2
 
-void resolve(const void *buf, int len, struct sockaddr *from, int fromlen) {
+pid_t resolve(const void *buf, int len, struct sockaddr *from, int fromlen) {
 	struct addrinfo *res;
 	unsigned char rbuf[512];
 	int rlen;
@@ -88,7 +106,7 @@ void resolve(const void *buf, int len, struct sockaddr *from, int fromlen) {
 	if (pid < 0)
 		exit(EXIT_FAILURE);
 	if (pid > 0)
-		return;
+		return pid;
 
 	res = &G.server_info;
 	int sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
@@ -138,14 +156,14 @@ void resolve(const void *buf, int len, struct sockaddr *from, int fromlen) {
 	exit(EXIT_SUCCESS);
 }
 
-void signal_handler(int sig) {
+void sigchld_handler(int sig) {
 	wait(NULL);
 }
 
 void start_server() {
 	struct addrinfo hints, *res;
 
-	signal(SIGCHLD, signal_handler);
+	signal(SIGCHLD, sigchld_handler);
 
 	// Get remote server info
 	memset(&hints, 0, sizeof(hints));
@@ -167,6 +185,10 @@ void start_server() {
 	if (G.server_sock < 0)
 		exit_error("socket");
 
+	int val = 1;
+	if (setsockopt(G.server_sock, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val)) < 0)
+		exit_error("setsockopt");
+
 	if (bind(G.server_sock, res->ai_addr, res->ai_addrlen) < 0)
 		exit_error("bind");
 
@@ -186,21 +208,21 @@ void start_server() {
 }
 
 int main(int argc, char **argv) {
-	if (argc < 4) {
+	if (argc != 5) {
 		fprintf(stderr, 
-				"Usage: dnsforward <server> <port> <type> [lock]\n"
+				"Usage: dnsforward <server> <port> <type> <lock>\n"
 				"Where:\n"
 				"  server: IP address of remote DNS server\n"
 				"  port:   remote DNS port\n"
 				"  type:   server type, udp or tcp\n"
-				"  lock:   lock file, will contain PID\n");
+				"  lock:   lock file\n");
 		exit(EXIT_FAILURE);
 	}
 
 	G.server = argv[1];
 	G.port = argv[2];
 	G.type = !strcmp("udp", argv[3]) ? SOCK_DGRAM : SOCK_STREAM;
-	G.lock = argc > 4 ? argv[4] : LOCK_FILE;
+	G.lockname = argv[4];
 
 	start_server();
 	return 0;
